@@ -1,0 +1,35 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  userSignUpFunction
+
+  Sample SAM Template for userSignUpFunction
+
+Globals:
+  Function:
+    Timeout: 10
+    Environment:
+      Variables:
+        REGION: us-east-1
+        KINESIS_API_VERSION: 2013-12-02
+        KINESIS_STREAM_NAME: test
+        KMS_ALIAS: alias/streaming-ingest-lab-users
+
+Resources:
+  UserSignUpFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: userSignUpFunction/
+      Handler: app.lambda_handler
+      Runtime: python3.7
+
+Outputs:
+  UserSignUpApi:
+    Description: "API Gateway endpoint URL for Prod stage for Hello World function"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
+  UserSignUpFunction:
+    Description: "Hello World Lambda Function ARN"
+    Value: !GetAtt UserSignUpFunction.Arn
+  UserSignUpFunctionIamRole:
+    Description: "Implicit IAM Role created for Hello World function"
+    Value: !GetAtt UserSignUpFunctionRole.Arn
