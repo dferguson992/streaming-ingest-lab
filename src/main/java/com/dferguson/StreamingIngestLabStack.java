@@ -1,14 +1,18 @@
 package com.dferguson;
 
-import com.amazonaws.services.kinesisfirehose.model.ProcessorParameter;
-import com.amazonaws.services.kinesisfirehose.model.ProcessorParameterName;
-import com.amazonaws.services.kinesisfirehose.model.ProcessorType;
+import com.amazonaws.services.glue.model.Classifier;
+import com.amazonaws.services.glue.model.Crawler;
+import com.amazonaws.services.kinesisfirehose.model.*;
+import org.jetbrains.annotations.NotNull;
 import software.amazon.awscdk.core.*;
 import software.amazon.awscdk.core.Stack;
 import software.amazon.awscdk.services.events.IRuleTarget;
 import software.amazon.awscdk.services.events.Rule;
 import software.amazon.awscdk.services.events.RuleProps;
 import software.amazon.awscdk.services.events.Schedule;
+import software.amazon.awscdk.services.glue.CfnCrawler;
+import software.amazon.awscdk.services.glue.CfnCrawlerProps;
+import software.amazon.awscdk.services.glue.DatabaseProps;
 import software.amazon.awscdk.services.iam.*;
 import software.amazon.awscdk.services.kinesis.IStream;
 import software.amazon.awscdk.services.kinesis.Stream;
@@ -20,9 +24,9 @@ import software.amazon.awscdk.services.lambda.Runtime;
 import software.amazon.awscdk.services.kms.*;
 import software.amazon.awscdk.services.kinesisfirehose.CfnDeliveryStream;
 import software.amazon.awscdk.services.kinesisfirehose.CfnDeliveryStreamProps;
-import com.amazonaws.services.kinesisfirehose.model.Processor;
 import software.amazon.awscdk.services.s3.Bucket;
 import software.amazon.awscdk.services.s3.IBucket;
+import software.amazon.awscdk.services.glue.Database;
 
 import java.io.File;
 import java.util.*;
@@ -68,6 +72,7 @@ public class StreamingIngestLabStack extends Stack {
         userSignUpLambdaPolicies.add(ManagedPolicy.fromManagedPolicyArn(this, id + "-LambdaBasicExecMP", "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"));
         userSignUpLambdaPolicies.add(ManagedPolicy.fromManagedPolicyArn(this, id + "-S3FullAccessMP", "arn:aws:iam::aws:policy/AmazonS3FullAccess"));
         userSignUpLambdaPolicies.add(ManagedPolicy.fromManagedPolicyArn(this, id + "-LambdaInvokeMP", "arn:aws:iam::aws:policy/service-role/AWSLambdaRole"));
+        userSignUpLambdaPolicies.add(ManagedPolicy.fromManagedPolicyArn(this, id + "-GlueServiceRoleMP", "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"));
 
         // User Sign-Up Lambda Role
         IRole streamingIngestLabRole = Role.Builder.create(this, id +"-GetUserSignUpRole")
@@ -75,7 +80,8 @@ public class StreamingIngestLabStack extends Stack {
                 .description("Role assumed by User Sign Up Lambda for writing to Kinesis")
                 .assumedBy(new CompositePrincipal(
                         new ServicePrincipal("lambda.amazonaws.com"),
-                        new ServicePrincipal("firehose.amazonaws.com")
+                        new ServicePrincipal("firehose.amazonaws.com"),
+                        new ServicePrincipal("glue.amazonaws.com")
                 ))
                 .managedPolicies(userSignUpLambdaPolicies)
                 .build();
@@ -101,6 +107,8 @@ public class StreamingIngestLabStack extends Stack {
         final IBucket destinationBucket = Bucket.fromBucketArn(this, id + "-S3Destination", "arn:aws:s3:::ippon-df-datalake");
         final String kinesisStreamName = "UserDeliveryStream";
         final String firehoseStreamName = "UserDataStreamToS3Loader";
+        final String s3BucketPrefix = "streaming-ingest-lab/";
+        final String s3BucketErrorPrefix = "streaming-ingest-lab-errors/";
         final String awsRegion = Objects.requireNonNull(props.getEnv()).getRegion() != null ? Objects.requireNonNull(props.getEnv()).getRegion() : "us-east-1";
 
 
@@ -190,14 +198,32 @@ public class StreamingIngestLabStack extends Stack {
                         .build())
                 .extendedS3DestinationConfiguration(CfnDeliveryStream.ExtendedS3DestinationConfigurationProperty.builder()
                         .bucketArn(destinationBucket.getBucketArn())
-                        .prefix("streaming-ingest-lab/")
+                        .prefix(s3BucketPrefix)
                         .bufferingHints(CfnDeliveryStream.BufferingHintsProperty.builder()
-                                .intervalInSeconds(100)
-                                .sizeInMBs(1)
+                                .intervalInSeconds(300)
+                                .sizeInMBs(64)
                                 .build())
                         .compressionFormat("UNCOMPRESSED")
-                        .errorOutputPrefix("streaming-ingest-lab-errors/")
+                        .errorOutputPrefix(s3BucketErrorPrefix)
                         .roleArn(streamingIngestLabRole.getRoleArn())
+                        .dataFormatConversionConfiguration(CfnDeliveryStream.DataFormatConversionConfigurationProperty.builder()
+                                .enabled(Boolean.TRUE)
+                                .inputFormatConfiguration(CfnDeliveryStream.InputFormatConfigurationProperty.builder()
+                                        .deserializer(CfnDeliveryStream.DeserializerProperty.builder()
+                                                .openXJsonSerDe(CfnDeliveryStream.OpenXJsonSerDeProperty.builder()
+                                                        .caseInsensitive(Boolean.TRUE)
+                                                        .build())
+                                                .build())
+                                        .build())
+                                .outputFormatConfiguration(CfnDeliveryStream.OutputFormatConfigurationProperty.builder()
+                                        .serializer(CfnDeliveryStream.SerializerProperty.builder()
+                                                .parquetSerDe(CfnDeliveryStream.ParquetSerDeProperty.builder()
+                                                        .compression("SNAPPY")
+                                                        .enableDictionaryCompression(Boolean.TRUE)
+                                                        .build())
+                                                .build())
+                                        .build())
+                                .build())
                         .processingConfiguration(CfnDeliveryStream.ProcessingConfigurationProperty.builder()
                                 .enabled(Boolean.TRUE)
                                 .processors(processors)
@@ -205,7 +231,26 @@ public class StreamingIngestLabStack extends Stack {
                         .build())
                 .build());
 
-//        AWS Lambda that triggers a Glue Crawler on S3 object creation
-//        Glue Crawler that creates a database of matching users
+        // Glue Database and Crawler that runs hourly
+        Database userDatabase = new Database(this, id + "-UserDatabase", DatabaseProps.builder()
+                .databaseName("streaming-ingest-users-db")
+                .build());
+        List<Object> targets = new ArrayList<>();
+        targets.add(CfnCrawler.S3TargetProperty.builder()
+                .path("s3://" + destinationBucket.getBucketName() + "/" + s3BucketPrefix)
+                .build());
+
+
+        new CfnCrawler(this, id + "-UserCrawler", CfnCrawlerProps.builder()
+                .databaseName(userDatabase.getDatabaseName())
+                .name("StreamingIngestUserCrawler")
+                .targets(CfnCrawler.TargetsProperty.builder()
+                        .s3Targets(targets)
+                        .build())
+                .schedule(CfnCrawler.ScheduleProperty.builder()
+                        .scheduleExpression("cron(0 * * * ? *)")
+                        .build())
+                .role(streamingIngestLabRole.getRoleArn())
+                .build());
     }
 }

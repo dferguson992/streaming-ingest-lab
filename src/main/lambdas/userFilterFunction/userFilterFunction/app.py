@@ -14,13 +14,15 @@ def lambda_handler(event, context):
         print("Payload ==> " + str(json.loads(payload.decode('utf-8'))))
         print("Record ID ==> " + str(record['recordId']))
 
-        filter_array = json.loads(payload.decode('utf-8'))
+        filter_array = json.loads(payload.decode('utf-8'))[0]
+        print("Filter Array ==> " + str(filter_array))
         age = filter_array["dob"]["age"]
 
         if age > 20:
             output_record = {
                 'recordId': record['recordId'],
                 'result': 'Ok',
+                # 'data': base64.b64encode(json.dumps(filter_array).encode('UTF-8')).decode('UTF-8')
                 'data': base64.b64encode(payload).decode('utf-8')
             }
         else:
